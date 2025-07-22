@@ -55,15 +55,7 @@ def load_progressive_curriculum(curriculum_folder: str) -> list:
 
 
 def main():
-    """
-    Main training script for truss optimization using progressive curriculum
-    
-    🚀 FIXED VERSION: Reduced entropy regularization to improve policy confidence
-    Expected improvements from original settings:
-    - Entropy values: 11-12 → 2-4 (much more confident policy)  
-    - Non-deterministic accuracy: 0.14-0.28 → 0.60+ (closer to deterministic)
-    - Faster convergence to confident policy decisions
-    """
+
 
     # Training settings (MODIFIED for better confidence)
     settings = {
@@ -75,8 +67,8 @@ def main():
             "gamma": 0.95,
             # 🚀 FIXED ENTROPY SETTINGS - Reduced to improve policy confidence
             "base_entropy_weight": 0.001,        # Keep current value - focus on learning rate instead
-            "entropy_weight_increase": 0.0001,   # CHANGED: 0.001 → 0.0001 (10x slower increase)
-            "max_entropy_weight": 0.002,         # CHANGED: 0.01 → 0.002 (5x reduction)
+            "entropy_weight_increase": 0.001,   # CHANGED: 0.001 → 0.0001 (10x slower increase)
+            "max_entropy_weight": 0.01,         # CHANGED: 0.01 → 0.002 (5x reduction)
             "per_alpha": 0.8,
             "per_beta": 0.1,
             "per_num_anneal": 500,
@@ -85,14 +77,14 @@ def main():
         "training": {
             "max_train_episodes": 5000,
             "save_delta_accuracy": 0.01,
-            "policy_update_batch_size": 512,  # Increased for better GPU utilization
+            "policy_update_batch_size": 1024,  # Increased for better GPU utilization
             "K_epochs": 5,
-            "num_rollouts": 128,  # Increased for better GPU utilization
+            "num_rollouts": 512,  # Increased for better GPU utilization
             "policy_name": "truss_progressive_policy",
-            "terminate_nondeterministic_accuracy": 0.85,  # CHANGED: 0.92 → 0.85 (lower since less exploration)
+            "terminate_nondeterministic_accuracy": 0.88,
             "terminate_deterministic_accuracy": 0.95,
             "save_epochs": 10,  # Evaluate accuracy every N episodes (like disassembly training)
-            "accuracy_sample_size": 100  # Number of curriculum items to sample for accuracy evaluation
+            "accuracy_sample_size": 200  # Number of curriculum items to sample for accuracy evaluation
         }
     }
 

@@ -24,7 +24,7 @@ class TrussEnv:
         #self.num_rollouts = 64
         
         # Curriculum management - will be set when curriculum is loaded
-        self.curriculum = None
+        #self.curriculum = None
         self.optimal_compliance = {}
 
     @property
@@ -42,78 +42,6 @@ class TrussEnv:
         new_design_states[inds, actions] = 0  # just remove the bar
         return new_design_states
 
-    # def encode_state(self, state):
-    #     # Round to integers to avoid numerical errors in cache keys
-    #     # Since we have single load case, only use design state as cache key
-    #     state_tuple = tuple(int(round(x)) for x in state)
-    #     return state_tuple
-
-    # def add_stability_history(self, design_states, stable_flags):
-    #     for ind in range(len(design_states)):
-    #         state_encode = self.encode_state(design_states[ind])
-    #         if state_encode not in self.stability_cache:
-    #             self.stability_cache[state_encode] = stable_flags[ind]
-    #
-    # def add_compliance_history(self, design_states, compliance_arrays):
-    #     """Store compliance data in cache"""
-    #     for ind in range(len(design_states)):
-    #         state_encode = self.encode_state(design_states[ind])
-    #         if state_encode not in self.compliance_cache:
-    #             self.compliance_cache[state_encode] = np.array(compliance_arrays[ind])
-
-    # def get_compliance_history(self, design_state):
-    #     """Get cached compliance data for a design state"""
-    #     key = self.encode_state(design_state)
-    #     if key in self.compliance_cache:
-    #         return self.compliance_cache[key]
-    #     return None  # unknown
-
-    # def cache_curriculum_compliance(self, design_state, curriculum_idx):
-    #     """
-    #     Compute and cache compliance for curriculum states (known to be stable)
-    #     More efficient than check_stability since we skip stability validation
-    #     """
-    #     try:
-    #         # Convert to numpy array if needed
-    #         if not isinstance(design_state, np.ndarray):
-    #             design_state = np.array(design_state, dtype=np.float32)
-    #
-    #         # Check if already cached - avoid unnecessary computation
-    #         cached_compliance = self.get_compliance_history(design_state)
-    #         if cached_compliance is not None:
-    #             self.stability_cache[self.encode_state(design_state)] = 1  # Mark as stable
-    #             return True
-    #
-    #         temp_truss = copy.deepcopy(self.temp_truss)
-    #
-    #         # Get force info from curriculum
-    #         force_node = self.curriculum_force_inds[curriculum_idx][0]
-    #         force = self.curriculum_force[curriculum_idx]
-    #
-    #         ext_force = temp_truss.create_external_force_vector(force_indices=[force_node], force_vectors=force)
-    #         temp_truss.update_bars_with_weight(design_state)
-    #         displacement, success, message = temp_truss.solve_elasticity(ext_force)
-    #
-    #         if not success:
-    #             self.stability_cache[self.encode_state(design_state)] = -1
-    #             self.add_compliance_history([design_state], [np.zeros(self.n_bars)])
-    #             return False
-    #
-    #         temp_compliance = temp_truss.bar_compliances # per bar compliance
-    #
-    #         # Filter compliance: set removed bars (design_state == 0) to zero compliance
-    #         filtered_compliance = np.array(temp_compliance)
-    #         filtered_compliance[design_state < 1e-6] = 0.0
-    #
-    #         # Cache the compliance data and mark as stable
-    #         self.add_compliance_history([design_state], [filtered_compliance])
-    #         self.stability_cache[self.encode_state(design_state)] = 1  # Known stable
-    #         return True
-    #
-    #     except Exception as e:
-    #         self.stability_cache[self.encode_state(design_state)] = -1
-    #         self.add_compliance_history([design_state], [np.zeros(self.n_bars)])
-    #         return False
 
     def set_curriculum(self, curriculum: List[Dict]):
         self.curriculum = copy.deepcopy(curriculum)
@@ -202,7 +130,7 @@ class TrussEnv:
             # self.stability_cache[self.encode_state(design_state)] = -1
             # Cache zero compliance for error states (no valid physics)
             # self.add_compliance_history([design_state], [np.zeros(self.n_bars)])
-            return -1
+            raise ValueError("Stability check failed!")
 
     def check_terminate(self, design_states, force_nodes, force_dirs):
         """Check termination condition for batch of states"""

@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 import numpy as np
 from typing import Dict, List, Tuple, Optional
-from time import perf_counter
+#from time import perf_counter
 import copy
 import pickle
 from buffer import TrussRolloutBuffer
-from env import TrussEnv
+#from env import TrussEnv
 from policy import MLPActorCritic
 
 
@@ -27,13 +27,13 @@ class TrussPPO:
         hidden_sizes = ppo_config.get("hidden_sizes", (512, 512, 256))
 
         self.policy = MLPActorCritic(
-            n_bars=self.n_bars,
+            truss=self.truss,
             obs_dim=obs_dim,
             hidden_sizes=hidden_sizes
         ).to(device)
 
         self.policy_old = MLPActorCritic(
-            n_bars=self.n_bars,
+            truss=self.truss,
             obs_dim=obs_dim,
             hidden_sizes=hidden_sizes
         ).to(device)
@@ -82,7 +82,13 @@ class TrussPPO:
         self.accuracy_of_sample_curriculum = 0
         self.accuracy_of_entire_curriculum = 0
 
-    def select_action(self, design_states, compliances, force_nodes, force_dirs, masks: np.ndarray, env_inds: np.ndarray):
+    def select_action(self,
+                      design_states,
+                      compliances,
+                      force_nodes,
+                      force_dirs,
+                      masks: np.ndarray,
+                      env_inds: np.ndarray):
 
         env_masks = torch.tensor(masks, dtype=floatType, device=device)
         design_states_tensor = torch.stack([torch.tensor(ds, dtype=floatType) for ds in design_states]).to(device)
@@ -90,7 +96,7 @@ class TrussPPO:
         compliances_tensor = torch.tensor(np.array(compliances), dtype=floatType, device=device)
 
         force_nodes_tensor = torch.tensor(force_nodes, dtype=torch.long, device=device)
-
+        #
         force_dirs_tensor = torch.tensor(force_dirs, dtype=torch.long, device=device)
 
 

@@ -352,19 +352,19 @@ def generate_progressive_curriculum(
             
             #total_designs += 1
     
-    if designs_by_level:
-        optimal_edges_count = len(optimal_edges)
-        total_edges_count = len(temp_truss.all_edges)
-        max_level = max(designs_by_level.keys()) if designs_by_level else 0
-        total_unique_designs = sum(len(designs) for designs in designs_by_level.values())
-        print(
-            f"Generated progressive curriculum: {total_unique_designs} unique designs across levels 0-{max_level} "
-            f"(optimal {optimal_edges_count} → complete {total_edges_count} edges) "
-            f"for node {force_indices[0]}, direction {direction_idx}")
-        print(f"  Before filtering: {total_before_filtering}, After filtering: {total_after_filtering}")
-        print(f"  Cache key format: (force_node={force_indices[0]}, direction={direction_idx}, design_state)")
-    else:
-        print(f"No curriculum generated for node {force_indices[0]}, direction {direction_idx}")
+    # if designs_by_level:
+    #     optimal_edges_count = len(optimal_edges)
+    #     total_edges_count = len(temp_truss.all_edges)
+    #     max_level = max(designs_by_level.keys()) if designs_by_level else 0
+    #     total_unique_designs = sum(len(designs) for designs in designs_by_level.values())
+    #     print(
+    #         f"Generated progressive curriculum: {total_unique_designs} unique designs across levels 0-{max_level} "
+    #         f"(optimal {optimal_edges_count} → complete {total_edges_count} edges) "
+    #         f"for node {force_indices[0]}, direction {direction_idx}")
+    #     print(f"  Before filtering: {total_before_filtering}, After filtering: {total_after_filtering}")
+    #     print(f"  Cache key format: (force_node={force_indices[0]}, direction={direction_idx}, design_state)")
+    # else:
+    #     print(f"No curriculum generated for node {force_indices[0]}, direction {direction_idx}")
     
     #return total_designs
 
@@ -373,6 +373,7 @@ if __name__ == "__main__":
     # Configuration
     nx, ny, nz = 3, 3, 1  # 3x3x1 grid truss
     force_nodes = [1,2,4,5,7,8]
+    #force_nodes = [2]
     truss = generate_grid_truss(nx, ny, nz)
     directions = np.linspace(0, 2 * np.pi, 8, endpoint=False)  # 8 force directions
     amplitude = 0.5
@@ -382,11 +383,11 @@ if __name__ == "__main__":
     
     output_dir = "progressive_curriculum"
     Path(output_dir).mkdir(exist_ok=True)
-    
+
     # print(f"Generating progressive curriculum for node {force_node} with direction {direction_idx}")
     # print(f"Will generate up to {max_paths} curriculum paths")
     # print(f"Designs will be saved to level_i folders with hash table duplicate filtering")
-    
+
     # Generate curriculum for single load case: node 2, direction 6
     #theta = directions[direction_idx]
     for idx in range(len(directions)):
@@ -415,7 +416,7 @@ if __name__ == "__main__":
                 level_designs = len(list(level_dir.glob("*.json")))
                 total_curriculum_designs += level_designs
                 print(f"Level {level_dir.name}: {level_designs} designs")
-    
+
     print(f"\n=== CURRICULUM GENERATION SUMMARY ===")
     #print(f"Load case: Node {force_node}, Direction {direction_idx}")
     print(f"Total curriculum designs generated: {total_curriculum_designs}")

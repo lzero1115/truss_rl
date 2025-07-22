@@ -131,8 +131,8 @@ class TrussRolloutBuffer:
 
         # Truss-specific equivalents to assembly project fields
         self.design_states = [[] for _ in range(num_env)]  # equivalent to part_states
-        self.next_design_states = [[] for _ in range(num_env)]  # equivalent to next_states
-        self.next_stability = [[] for _ in range(num_env)]  # equivalent to next_stability
+        #self.next_design_states = [[] for _ in range(num_env)]  # equivalent to next_states
+        #self.next_stability = [[] for _ in range(num_env)]  # equivalent to next_stability
         self.rewards_per_step = [[] for _ in range(num_env)]  # equivalent to rewards_per_step
 
         # Additional truss-specific data (removed force_nodes and force_dirs)

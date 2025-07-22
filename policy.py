@@ -1,36 +1,38 @@
 import torch
-from torch import nn
-import torch.nn.functional as F
+import torch.nn as nn
 from torch.distributions import Categorical
+from src.Truss import TrussStructure
+import copy
 
-# Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-floatType = torch.float32
-intType = torch.int32
 
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, n_bars, obs_dim=256,
-                 hidden_sizes=(512, 512, 256)):
+    def __init__(self, truss: TrussStructure, obs_dim=256, hidden_sizes=(512, 512, 256)):
         super().__init__()
+        self.truss = copy.deepcopy(truss)
+        self.n_bars = len(self.truss.all_edges)
+        self.n_nodes = self.truss.n_nodes
 
-        # === Simplified Observation Encoder ===
-        # Only use design state (no node/direction encoding)
-        action_dim = n_bars
+        # === Static parts of observation ===
+        self.fixed_onehot = torch.zeros(self.n_nodes, dtype=torch.float32, device=device)
+        for j in self.truss.fixed_nodes:
+            self.fixed_onehot[j] = 1.0
 
-        force_dim = 8
-        node_dim = 9
-        encode_dim_1 = 4
-        encode_dim_2 = 4
+        self.connectivity_flat = self.get_connectivity_matrix().flatten().to(device)
 
-        self.force_node_embedding = nn.Embedding(node_dim, encode_dim_1, device=device)
-        self.force_direction_embedding = nn.Embedding(force_dim, encode_dim_2, device=device)
+        # === Total input dimension ===
+        # design + compliance (2*n_bars) + fixed (n_nodes) + force_node (n_nodes) +
+        # force_direction (8 classes) + connectivity (n_nodes^2)
+        self.raw_obs_dim = (
+            2 * self.n_bars +         # design + compliance
+            self.n_nodes +           # fixed node one-hot
+            self.n_nodes +           # force node one-hot
+            8 +                      # force direction one-hot
+            self.n_nodes * self.n_nodes  # flattened connectivity
+        )
 
-
-        self.raw_obs_dim = 2 * n_bars + encode_dim_1 + encode_dim_2
-        # else:
-        #     self.raw_obs_dim = n_bars  # only design_state
-
+        # === Observation encoder ===
         self.encoder_mlp = nn.Sequential(
             nn.Linear(self.raw_obs_dim, obs_dim),
             nn.LayerNorm(obs_dim),
@@ -41,92 +43,86 @@ class MLPActorCritic(nn.Module):
             nn.Linear(obs_dim, obs_dim)
         )
 
-        # === Policy Network ===
-        policy_layers = []
-        prev_dim = obs_dim
-        for hidden_size in hidden_sizes:
-            policy_layers.extend([
-                nn.Linear(prev_dim, hidden_size),
-                nn.LayerNorm(hidden_size),
-                nn.Sigmoid()
-            ])
-            prev_dim = hidden_size
-        policy_layers.append(nn.Linear(prev_dim, action_dim))
-        policy_layers.append(nn.LayerNorm(action_dim))
-        policy_layers.append(nn.Sigmoid())
+        # === Policy network ===
+        self.policy_net = self._build_net(obs_dim, hidden_sizes, self.n_bars, final_activation=True)
 
-        self.policy_net = nn.Sequential(*policy_layers)
+        # === Value network ===
+        self.value_net = self._build_net(obs_dim, hidden_sizes, 1, final_activation=False)
 
-        # === Value Network ===
-        value_layers = []
-        prev_dim = obs_dim
-        for hidden_size in hidden_sizes:
-            value_layers.extend([
-                nn.Linear(prev_dim, hidden_size),
-                nn.LayerNorm(hidden_size),
-                nn.Sigmoid()
-            ])
-            prev_dim = hidden_size
-        value_layers.append(nn.Linear(prev_dim, 1))
-        value_layers.append(nn.Tanh())
-
-        self.value_net = nn.Sequential(*value_layers)
-
-        self.mask_prob = 1E-9
+        self.mask_prob = 1e-9
         self.to(device)
 
-    def encode_obs(self, design_state, compliance, force_node, force_dir):
-        raw_obs = torch.cat([design_state, compliance], dim=-1)  # [B, 2 * n_bars]
+    def get_connectivity_matrix(self):
+        """
+        Computes the adjacency matrix from self.truss.all_edges and self.truss.n_nodes.
+        Returns a [n_nodes x n_nodes] torch.FloatTensor on the correct device.
+        """
+        conn = torch.zeros((self.n_nodes, self.n_nodes), dtype=torch.float32, device=device)
+        for i, j in self.truss.all_edges:
+            conn[i, j] = 1.0
+            conn[j, i] = 1.0  # undirected connection
+        return conn
 
-        # 🛡️ Force all inputs to model's device
-        device = next(self.parameters()).device
-        raw_obs = raw_obs.to(device)
-        force_node = force_node.to(device)
-        force_dir = force_dir.to(device)
+    def _build_net(self, input_dim, hidden_sizes, output_dim, final_activation=False):
+        layers = []
+        prev_dim = input_dim
+        for h in hidden_sizes:
+            layers += [nn.Linear(prev_dim, h), nn.LayerNorm(h), nn.Sigmoid()]
+            prev_dim = h
+        layers.append(nn.Linear(prev_dim, output_dim))
+        if final_activation:
+            layers += [nn.LayerNorm(output_dim), nn.Sigmoid()]
+        else:
+            layers.append(nn.Tanh())
+        return nn.Sequential(*layers)
 
-        node_embed = self.force_node_embedding(force_node)
-        direction_embed = self.force_direction_embedding(force_dir)
+    def encode_obs(self, design_state, compliance, force_node_idx, force_direction_class):
+        B = design_state.shape[0] # batch size
 
-        full_obs = torch.cat([raw_obs, node_embed, direction_embed], dim=-1).to(device)
+        # === Static encodings ===
+        fixed_onehot = self.fixed_onehot.unsqueeze(0).repeat(B, 1)  # [B, n_nodes]
+        conn_flat = self.connectivity_flat.unsqueeze(0).repeat(B, 1)  # [B, n_nodes^2]
 
-        encoded_obs = self.encoder_mlp(full_obs)
+        # === Force node one-hot ===
+        force_node_onehot = torch.zeros((B, self.n_nodes), dtype=torch.float32, device=device)
+        force_node_onehot[torch.arange(B), force_node_idx] = 1.0
 
-        return encoded_obs
+        # === Force direction one-hot (8 directions)
+        force_dir_onehot = torch.zeros((B, 8), dtype=torch.float32, device=device)
+        force_dir_onehot[torch.arange(B), force_direction_class] = 1.0
 
-    def act(self, design_state, compliance, force_node, force_dir, mask=None, deterministic=False):
+        # === Bar features ===
+        bar_feat = torch.cat([design_state, compliance], dim=-1)  # [B, 2*n_bars]
 
-        obs = self.encode_obs(design_state, compliance, force_node, force_dir)
+        # === Final observation ===
+        obs = torch.cat([
+            bar_feat,             # [B, 2*n_bars]
+            fixed_onehot,         # [B, n_nodes]
+            force_node_onehot,    # [B, n_nodes]
+            force_dir_onehot,     # [B, 8]
+            conn_flat             # [B, n_nodes^2]
+        ], dim=-1)
 
+        return self.encoder_mlp(obs)
 
+    def act(self, design_state, compliance, force_node_idx, force_direction_class, mask=None, deterministic=False):
+        obs = self.encode_obs(design_state, compliance, force_node_idx, force_direction_class)
         act_prob = self.policy_net(obs)
-
         if mask is not None:
             act_prob = mask * act_prob + mask * self.mask_prob
-
         dist = Categorical(act_prob)
         value = self.value_net(obs).squeeze(-1)
-
-        if deterministic:
-            action = torch.argmax(act_prob, dim=-1)
-        else:
-            action = dist.sample()
-
+        action = torch.argmax(act_prob, dim=-1) if deterministic else dist.sample()
         logprob = dist.log_prob(action)
-
         return action.detach(), logprob.detach(), value.detach()
 
-    def evaluate(self, design_state, action, compliance, force_node, force_dir, mask=None):
-
-        obs = self.encode_obs(design_state, compliance, force_node, force_dir)
-
+    def evaluate(self, design_state, action, compliance, force_node_idx, force_direction_class, mask=None):
+        obs = self.encode_obs(design_state, compliance, force_node_idx, force_direction_class)
         act_prob = self.policy_net(obs)
-
         if mask is not None:
             act_prob = mask * act_prob + mask * self.mask_prob
-
         dist = Categorical(act_prob)
         value = self.value_net(obs).squeeze(-1)
         logprob = dist.log_prob(action)
         entropy = dist.entropy()
-
         return logprob, value, entropy

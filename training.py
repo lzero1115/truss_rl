@@ -139,6 +139,7 @@ def compute_accuracy(env, state_dict, settings, deterministic=True):
     training_config = settings.get("training", {})
     accuracy_sample_size = training_config.get("accuracy_sample_size", 100)
     num_of_sample = min(accuracy_sample_size, len(env.curriculum))
+
     ppo_agent.buffer.curriculum_inds = np.random.choice(len(env.curriculum), size=num_of_sample, replace=False)
     ppo_agent.buffer.rewards = training_rollout(ppo_agent,
                                                 env,
@@ -197,13 +198,20 @@ def training_rollout(ppo_agent: TrussPPO,
 
         # Select actions using PPO agent with optimized GPU usage
         current_actions = ppo_agent.select_action(
-            current_design_states_active, compliances_active, force_nodes_active, force_dirs_active,
-            masks, env_inds
+            current_design_states_active,
+            compliances_active,
+            force_nodes_active,
+            force_dirs_active,
+            masks,
+            env_inds
         )
 
         # Take environment step with force parameters
         next_design_states, rewards, next_stability = env.step(
-            current_design_states_active, current_actions, force_nodes_active, force_dirs_active
+            current_design_states_active,
+            current_actions,
+            force_nodes_active,
+            force_dirs_active
         )
 
         # Update design states for active environments
