@@ -84,7 +84,7 @@ def main():
             "terminate_nondeterministic_accuracy": 0.88,
             "terminate_deterministic_accuracy": 0.95,
             "save_epochs": 10,  # Evaluate accuracy every N episodes (like disassembly training)
-            "accuracy_sample_size": 200  # Number of curriculum items to sample for accuracy evaluation
+            "accuracy_sample_size": 500  # Number of curriculum items to sample for accuracy evaluation
         }
     }
 

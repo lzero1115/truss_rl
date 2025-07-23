@@ -1,128 +1,115 @@
 import torch
-import torch.nn as nn
+from torch import nn
+import torch.nn.functional as F
 from torch.distributions import Categorical
-from src.Truss import TrussStructure
-import copy
+from torch_geometric.nn import HeteroConv, GATConv, global_mean_pool
+from torch_geometric.data import Batch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+floatType = torch.float32
+intType = torch.int32
 
-
-class MLPActorCritic(nn.Module):
-    def __init__(self, truss: TrussStructure, obs_dim=256, hidden_sizes=(512, 512, 256)):
+class TrussGNNEncoder(nn.Module):
+    """
+    GNN encoder for truss graphs. Processes HeteroData and outputs (probs, value).
+    - probs: action probabilities for each bar (after sigmoid)
+    - value: scalar value for the whole graph (after tanh)
+    Joint node features: [x, y, is_fixed, is_loaded, cos(theta), sin(theta)] (6 features)
+    """
+    def __init__(self, hidden_dim=64, num_layers=3):
         super().__init__()
-        self.truss = copy.deepcopy(truss)
-        self.n_bars = len(self.truss.all_edges)
-        self.n_nodes = self.truss.n_nodes
-
-        # === Static parts of observation ===
-        self.fixed_onehot = torch.zeros(self.n_nodes, dtype=torch.float32, device=device)
-        for j in self.truss.fixed_nodes:
-            self.fixed_onehot[j] = 1.0
-
-        self.connectivity_flat = self.get_connectivity_matrix().flatten().to(device)
-
-        # === Total input dimension ===
-        # design + compliance (2*n_bars) + fixed (n_nodes) + force_node (n_nodes) +
-        # force_direction (8 classes) + connectivity (n_nodes^2)
-        self.raw_obs_dim = (
-            2 * self.n_bars +         # design + compliance
-            self.n_nodes +           # fixed node one-hot
-            self.n_nodes +           # force node one-hot
-            8 +                      # force direction one-hot
-            self.n_nodes * self.n_nodes  # flattened connectivity
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        # Joint encoder: [x, y, is_fixed, is_loaded, cos(theta), sin(theta)]
+        self.joint_encoder = nn.Linear(6, hidden_dim)
+        self.bar_encoder = nn.Linear(1 + 1 + 2, hidden_dim)         # [design_state, compliance, endpoint indices]
+        convs = []
+        for _ in range(num_layers):
+            conv = HeteroConv({
+                ('bar', 'connects', 'joint'): GATConv(hidden_dim, hidden_dim, add_self_loops=False),
+                ('joint', 'rev_connects', 'bar'): GATConv(hidden_dim, hidden_dim, add_self_loops=False),
+            }, aggr='sum')
+            convs.append(conv)
+        self.convs = nn.ModuleList(convs)
+        # Actor head: outputs probability for each bar (sigmoid)
+        self.actor_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()  # Output probability directly
+        )
+        # Critic head: outputs a value for the whole graph, with tanh activation
+        self.critic_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Tanh()  # Ensure value is in [-1, 1]
         )
 
-        # === Observation encoder ===
-        self.encoder_mlp = nn.Sequential(
-            nn.Linear(self.raw_obs_dim, obs_dim),
-            nn.LayerNorm(obs_dim),
-            nn.Sigmoid(),
-            nn.Linear(obs_dim, obs_dim),
-            nn.LayerNorm(obs_dim),
-            nn.Sigmoid(),
-            nn.Linear(obs_dim, obs_dim)
-        )
+    def forward(self, data):
+        # Joint node features: [x, y, is_fixed, is_loaded, cos(theta), sin(theta)]
+        joint_features = data['joint'].x  # [n_joints, 6]
+        x_dict = {
+            'joint': self.joint_encoder(joint_features),
+            'bar': self.bar_encoder(data['bar'].x)
+        }
+        for conv in self.convs:
+            x_dict = conv(x_dict, data.edge_index_dict)
+            x_dict = {k: F.relu(v) for k, v in x_dict.items()}
+        bar_feats = x_dict['bar']  # [total_bars_in_batch, hidden_dim]
+        probs = self.actor_head(bar_feats).squeeze(-1)  # [total_bars_in_batch], in [0,1]
+        batch = data['bar'].batch if hasattr(data['bar'], 'batch') else torch.zeros(bar_feats.size(0), dtype=torch.long, device=bar_feats.device)
+        pooled = global_mean_pool(bar_feats, batch)
+        value = self.critic_head(pooled).squeeze(-1)
+        return probs, value
 
-        # === Policy network ===
-        self.policy_net = self._build_net(obs_dim, hidden_sizes, self.n_bars, final_activation=True)
-
-        # === Value network ===
-        self.value_net = self._build_net(obs_dim, hidden_sizes, 1, final_activation=False)
-
-        self.mask_prob = 1e-9
+class TrussGNNActorCritic(nn.Module):
+    """
+    Actor-critic policy for truss RL using a GNN encoder.
+    - The encoder returns (probs, value) directly.
+    - The actor outputs probabilities (not logits) for each bar.
+    - The critic outputs a value for the whole graph.
+    """
+    def __init__(self, hidden_dim=64, num_layers=3, num_actions=None, num_force_dirs=8, force_dir_embed_dim=4):
+        super().__init__()
+        self.encoder = TrussGNNEncoder(hidden_dim=hidden_dim, num_layers=num_layers)
+        self.hidden_dim = hidden_dim
+        self.num_actions = num_actions
+        self.mask_prob = 1E-9
         self.to(device)
 
-    def get_connectivity_matrix(self):
-        """
-        Computes the adjacency matrix from self.truss.all_edges and self.truss.n_nodes.
-        Returns a [n_nodes x n_nodes] torch.FloatTensor on the correct device.
-        """
-        conn = torch.zeros((self.n_nodes, self.n_nodes), dtype=torch.float32, device=device)
-        for i, j in self.truss.all_edges:
-            conn[i, j] = 1.0
-            conn[j, i] = 1.0  # undirected connection
-        return conn
+    def forward(self, data):
+        # Returns (probs, value)
+        return self.encoder(data)
 
-    def _build_net(self, input_dim, hidden_sizes, output_dim, final_activation=False):
-        layers = []
-        prev_dim = input_dim
-        for h in hidden_sizes:
-            layers += [nn.Linear(prev_dim, h), nn.LayerNorm(h), nn.Sigmoid()]
-            prev_dim = h
-        layers.append(nn.Linear(prev_dim, output_dim))
-        if final_activation:
-            layers += [nn.LayerNorm(output_dim), nn.Sigmoid()]
-        else:
-            layers.append(nn.Tanh())
-        return nn.Sequential(*layers)
-
-    def encode_obs(self, design_state, compliance, force_node_idx, force_direction_class):
-        B = design_state.shape[0] # batch size
-
-        # === Static encodings ===
-        fixed_onehot = self.fixed_onehot.unsqueeze(0).repeat(B, 1)  # [B, n_nodes]
-        conn_flat = self.connectivity_flat.unsqueeze(0).repeat(B, 1)  # [B, n_nodes^2]
-
-        # === Force node one-hot ===
-        force_node_onehot = torch.zeros((B, self.n_nodes), dtype=torch.float32, device=device)
-        force_node_onehot[torch.arange(B), force_node_idx] = 1.0
-
-        # === Force direction one-hot (8 directions)
-        force_dir_onehot = torch.zeros((B, 8), dtype=torch.float32, device=device)
-        force_dir_onehot[torch.arange(B), force_direction_class] = 1.0
-
-        # === Bar features ===
-        bar_feat = torch.cat([design_state, compliance], dim=-1)  # [B, 2*n_bars]
-
-        # === Final observation ===
-        obs = torch.cat([
-            bar_feat,             # [B, 2*n_bars]
-            fixed_onehot,         # [B, n_nodes]
-            force_node_onehot,    # [B, n_nodes]
-            force_dir_onehot,     # [B, 8]
-            conn_flat             # [B, n_nodes^2]
-        ], dim=-1)
-
-        return self.encoder_mlp(obs)
-
-    def act(self, design_state, compliance, force_node_idx, force_direction_class, mask=None, deterministic=False):
-        obs = self.encode_obs(design_state, compliance, force_node_idx, force_direction_class)
-        act_prob = self.policy_net(obs)
+    def act(self, batch_graph, mask=None, deterministic=False):
+        probs, value = self.forward(batch_graph)
+        batch_size = batch_graph.num_graphs
+        n_bars = self.num_actions
+        # Reshape to [batch_size, n_bars]
+        probs = probs.view(batch_size, n_bars)
         if mask is not None:
-            act_prob = mask * act_prob + mask * self.mask_prob
-        dist = Categorical(act_prob)
-        value = self.value_net(obs).squeeze(-1)
-        action = torch.argmax(act_prob, dim=-1) if deterministic else dist.sample()
+            mask = mask.view(batch_size, n_bars)
+            probs = mask * probs + mask * self.mask_prob
+        dist = Categorical(probs)
+        if deterministic:
+            action = torch.argmax(probs, dim=-1)
+        else:
+            action = dist.sample()
         logprob = dist.log_prob(action)
         return action.detach(), logprob.detach(), value.detach()
 
-    def evaluate(self, design_state, action, compliance, force_node_idx, force_direction_class, mask=None):
-        obs = self.encode_obs(design_state, compliance, force_node_idx, force_direction_class)
-        act_prob = self.policy_net(obs)
+    def evaluate(self, batch_graph, action, mask=None):
+        probs, value = self.forward(batch_graph)
+        batch_size = batch_graph.num_graphs
+        n_bars = self.num_actions
+        probs = probs.view(batch_size, n_bars)
         if mask is not None:
-            act_prob = mask * act_prob + mask * self.mask_prob
-        dist = Categorical(act_prob)
-        value = self.value_net(obs).squeeze(-1)
+            mask = mask.view(batch_size, n_bars)
+            probs = mask * probs + mask * self.mask_prob
+        dist = Categorical(probs)
         logprob = dist.log_prob(action)
         entropy = dist.entropy()
         return logprob, value, entropy
