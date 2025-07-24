@@ -60,9 +60,11 @@ class TrussGNNEncoder(nn.Module):
             x_dict = {k: F.relu(v) for k, v in x_dict.items()}
         bar_feats = x_dict['bar']  # [total_bars_in_batch, hidden_dim]
         probs = self.actor_head(bar_feats).squeeze(-1)  # [total_bars_in_batch], in [0,1]
+        #print("probs shape", probs.shape)
         batch = data['bar'].batch if hasattr(data['bar'], 'batch') else torch.zeros(bar_feats.size(0), dtype=torch.long, device=bar_feats.device)
         pooled = global_mean_pool(bar_feats, batch)
         value = self.critic_head(pooled).squeeze(-1)
+        #print("value shape", value.shape)
         return probs, value
 
 class TrussGNNActorCritic(nn.Module):

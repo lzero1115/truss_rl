@@ -37,6 +37,9 @@ def load_curriculum_from_folder(curriculum_folder: str) -> List[Dict]:
     # Check if this is a progressive curriculum structure (level_i folders)
     level_dirs = [d for d in curriculum_folder.iterdir()
                   if d.is_dir() and d.name.startswith("level_")]
+    # level_dirs = [d for d in curriculum_folder.iterdir()
+    #             if d.is_dir() and d.name=="level_1"]
+    print(f"level_dirs: {level_dirs}")
 
     if level_dirs:
         # Progressive curriculum structure - load from level directories
@@ -311,6 +314,25 @@ def train_truss_optimization(curriculum_folder: str,
 
         # Calculate accuracy (randomly sampled, controlled by env.num_rollout)
         accuracy_of_sample_curriculum = (torch.sum(rewards > 0) / len(rewards)).item()
+        # Only extract selected keys for sampled curriculum items
+        data_info = [
+            {k: curriculum_data[i][k] for k in ['curriculum_design_variables', 'force_node_indices', 'direction_index']}
+            for i in curriculum_inds
+        ]
+        # Count those samples whose reward == 1 and update self.freq
+        for idx, reward in zip(curriculum_inds, rewards):
+            item = curriculum_data[idx]
+            design_vars = tuple(item['curriculum_design_variables'])
+            force_nodes = tuple(item['force_node_indices'])
+            direction = item['direction_index']
+            key = (design_vars, force_nodes, direction)
+            if reward > 1 - 1e-6:
+                if key in env.freq:
+                    env.freq[key] += 1
+            if key in env.freq_data:
+                env.freq_data[key] += 1
+
+        #[data, 1]
         accuracy_of_entire_curriculum = None
         accuracy_of_entire_curriculum_deterministic = None
 
@@ -342,7 +364,12 @@ def train_truss_optimization(curriculum_folder: str,
 
         if accuracy_of_entire_curriculum is not None:
             print("Non-deter. Acc:\t {:.2f}, \t\t Deter. Acc:\t {:.2f}".format(accuracy_of_entire_curriculum, accuracy_of_entire_curriculum_deterministic))
-
+            
+            # Sort self.freq by value and print the sorted array
+            sorted_freq = sorted(env.freq.items(), key=lambda x: x[1], reverse=False)
+            print("Top curriculum frequencies (sorted):")
+            for key, value in sorted_freq:
+                print(f"Key: {key}, True: {value}, Visited: {env.freq_data[key]}")
             
             # Exit if both accuracies meet termination thresholds (like disassembly training)
             if (accuracy_of_entire_curriculum > terminate_nondeterministic_accuracy

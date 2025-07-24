@@ -32,6 +32,8 @@ class TrussEnv:
         self.edge_dof_indices = [list(e) for e in self.temp_truss.edge_dof_indices]
         self.fixed_nodes = set(self.temp_truss.fixed_nodes)
         self.n_nodes = self.temp_truss.n_nodes
+        self.freq = dict() #key: tuple(hash), value: frequency
+        self.freq_data = dict() #key: tuple(hash), value: data
 
     @property
     def action_dim(self):
@@ -52,16 +54,35 @@ class TrussEnv:
         self.curriculum = copy.deepcopy(curriculum)
         self.curriculum_design = [item['curriculum_design_variables'] for item in curriculum]
 
+        # Save frequency of each (design_variables, force_node_indices, direction_index) combination
+        self.freq = dict()
+        for item in curriculum:
+            design_vars = tuple(item['curriculum_design_variables'])
+            force_nodes = tuple(item['force_node_indices'])
+            direction = item['direction_index']
+            key = (design_vars, force_nodes, direction)
+            if key in self.freq:
+                self.freq[key] = 0
+            else:
+                self.freq[key] = 0
+        
+        self.freq_data = dict()
+        for item in curriculum:
+            design_vars = tuple(item['curriculum_design_variables'])
+            force_nodes = tuple(item['force_node_indices'])
+            direction = item['direction_index']
+            key = (design_vars, force_nodes, direction)
+            self.freq_data[key] = 0
+
         for item in curriculum:
             node_idx = item['force_node_indices'][0]
             optimal_compliance = item['optimal_compliance']
             force_dir = item['direction_index']
-            key = tuple([node_idx, force_dir])
+            key = tuple([int(node_idx), int(force_dir)])
             if key not in self.optimal_compliance:
                 self.optimal_compliance[key] = optimal_compliance
 
         self.curriculum_force_inds = [item['force_node_indices'][0] for item in curriculum]
-        #self.curriculum_force = [item['force_list'] for item in curriculum]
         self.curriculum_force_dir = [item['direction_index'] for item in curriculum]
         self.force_amplitude = 0.5  # TODO: read it from json
         self.n_curriculum = len(curriculum)
@@ -69,6 +90,7 @@ class TrussEnv:
         self.compliance_cache = {}
         self.stability_cache = {}
         self.stiffness_cache = {}
+        
         for i, design in enumerate(self.curriculum_design):
             force_node = self.curriculum_force_inds[i]
             force_dir = self.curriculum_force_dir[i]
