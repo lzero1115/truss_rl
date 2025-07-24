@@ -379,7 +379,7 @@ if __name__ == "__main__":
     amplitude = 0.5
     #direction_idx = 6  # Only use direction 6
     volume_fraction = 0.5
-    max_paths = 16  # Number of curriculum paths to generate
+    max_paths = 8  # Number of curriculum paths to generate
     
     output_dir = "progressive_curriculum"
     Path(output_dir).mkdir(exist_ok=True)

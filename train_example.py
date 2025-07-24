@@ -61,14 +61,14 @@ def main():
     settings = {
         "ppo": {
             "eps_clip": 0.2,
-            "lr_actor": 4e-3,  # INCREASED: 2e-3 → 4e-3 for faster convergence to sharp distributions
+            "lr_actor": 5e-3,  # INCREASED: 2e-3 → 4e-3 for faster convergence to sharp distributions
             "betas_actor": [0.95, 0.999],
             "lr_milestones": [100, 300],
             "gamma": 0.95,
             # 🚀 FIXED ENTROPY SETTINGS - Reduced to improve policy confidence
             "base_entropy_weight": 0.001,        # Keep current value - focus on learning rate instead
-            "entropy_weight_increase": 0.001,   # CHANGED: 0.001 → 0.0001 (10x slower increase)
-            "max_entropy_weight": 0.01,         # CHANGED: 0.01 → 0.002 (5x reduction)
+            "entropy_weight_increase": 0.0001,   # CHANGED: 0.001 → 0.0001 (10x slower increase)
+            "max_entropy_weight": 0.002,         # CHANGED: 0.01 → 0.002 (5x reduction)
             "per_alpha": 0.8,
             "per_beta": 0.1,
             "per_num_anneal": 500,
@@ -104,8 +104,8 @@ def main():
         print(f"Settings: {json.dumps(settings, indent=2)}")
 
         # Load curriculum from all levels
-        curriculum_data = load_progressive_curriculum(curriculum_folder)
-        print(f"Loaded {len(curriculum_data)} curriculum items")
+        # curriculum_data = load_progressive_curriculum(curriculum_folder)
+        # print(f"Loaded {len(curriculum_data)} curriculum items")
 
         # Start training
         start_time = perf_counter()
