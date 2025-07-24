@@ -61,7 +61,7 @@ class TrussEnv:
                 self.optimal_compliance[key] = optimal_compliance
 
         self.curriculum_force_inds = [item['force_node_indices'][0] for item in curriculum]
-        self.curriculum_force = [item['force_list'] for item in curriculum]
+        #self.curriculum_force = [item['force_list'] for item in curriculum]
         self.curriculum_force_dir = [item['direction_index'] for item in curriculum]
         self.force_amplitude = 0.5  # TODO: read it from json
         self.n_curriculum = len(curriculum)

@@ -20,12 +20,10 @@ class TrussRolloutDataset(Dataset):
         #self.graph_data = []  # List of HeteroData objects
 
     def __getitem__(self, idx):
-        if idx >= len(self):
-            raise IndexError("Dataset index out of range")
         if idx < len(self) - 1:
             return self.batch_data_from_to(idx * self.batch_size, (idx + 1) * self.batch_size)
         else:
-            return self.batch_data_from_to(idx * self.batch_size, self.nstates)
+            return self.batch_data_from_to(idx * self.batch_size, len(self.graph_data))
 
     def __len__(self):
         return int(np.ceil(len(self.graph_data) / self.batch_size)) if hasattr(self, "graph_data") else 0
