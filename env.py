@@ -5,7 +5,7 @@ from typing import List, Tuple, Optional, Dict
 from scipy import sparse
 from scipy.sparse import linalg
 
-
+# 7.27
 class TrussEnv:
     def __init__(self, truss: TrussStructure, volume_ratio: float = 0.5):
         self.temp_truss = copy.deepcopy(truss)
@@ -17,14 +17,15 @@ class TrussEnv:
         self.target_volume_lb = self.volume_ratio * self.lb * self.temp_truss.get_truss_volume()
         self.n_bars = len(self.temp_truss.all_edges)
         self.compliance_threshold = 1.0  # manually set
-        self.cratio = 0.2
+        self.cratio = 0.3
         self.directions = np.linspace(0, 2 * np.pi, 8, endpoint=False)
 
-        self.compliance_cache = {}
-        self.stability_cache = {}
+        self.compliance_cache = {} # filtered compliance key:(design, node_idx, dir_idx)
+
+        self.stability_cache = {} # key: (design, node_idx, dir_idx)
         self.stiffness_cache = {}  # key: tuple(design_state), value: K
         self.curriculum = None
-        self.optimal_compliance = {}
+        self.optimal_compliance = {} # key: (node_idx, dir_idx)
         # Store mappings and bar info from base truss
         self.map_dof_entire2subset = self.temp_truss.map_dof_entire2subset
         self.map_dof_subset2entire = self.temp_truss.map_dof_subset2entire
@@ -32,12 +33,21 @@ class TrussEnv:
         self.edge_dof_indices = [list(e) for e in self.temp_truss.edge_dof_indices]
         self.fixed_nodes = set(self.temp_truss.fixed_nodes)
         self.n_nodes = self.temp_truss.n_nodes
-        self.freq = dict() #key: tuple(hash), value: frequency
-        self.freq_data = dict() #key: tuple(hash), value: data
 
     @property
     def action_dim(self):
         return self.n_bars  # just remove
+
+    def c_filter(self, compliance, design_variable):
+        assert len(design_variable) == len(compliance), "incorrect dimension!"
+        mask = design_variable > 1e-6
+        filtered_compliance = compliance.copy()  # Keep same length
+        filtered_compliance[~mask] = 0.0  # Set removed bars to 0
+        #compliance_sum = np.sum(filtered_compliance) + 1e-9
+        #normalized_compliance = filtered_compliance / compliance_sum
+
+        return filtered_compliance
+
 
     def next_states(self, design_states, actions):  # batch size operation
         new_design_states = design_states.copy()
@@ -54,35 +64,16 @@ class TrussEnv:
         self.curriculum = copy.deepcopy(curriculum)
         self.curriculum_design = [item['curriculum_design_variables'] for item in curriculum]
 
-        # Save frequency of each (design_variables, force_node_indices, direction_index) combination
-        self.freq = dict()
-        for item in curriculum:
-            design_vars = tuple(item['curriculum_design_variables'])
-            force_nodes = tuple(item['force_node_indices'])
-            direction = item['direction_index']
-            key = (design_vars, force_nodes, direction)
-            if key in self.freq:
-                self.freq[key] = 0
-            else:
-                self.freq[key] = 0
-        
-        self.freq_data = dict()
-        for item in curriculum:
-            design_vars = tuple(item['curriculum_design_variables'])
-            force_nodes = tuple(item['force_node_indices'])
-            direction = item['direction_index']
-            key = (design_vars, force_nodes, direction)
-            self.freq_data[key] = 0
-
         for item in curriculum:
             node_idx = item['force_node_indices'][0]
             optimal_compliance = item['optimal_compliance']
             force_dir = item['direction_index']
-            key = tuple([int(node_idx), int(force_dir)])
+            key = tuple([node_idx, force_dir])
             if key not in self.optimal_compliance:
                 self.optimal_compliance[key] = optimal_compliance
 
         self.curriculum_force_inds = [item['force_node_indices'][0] for item in curriculum]
+        #self.curriculum_force = [item['force_list'] for item in curriculum]
         self.curriculum_force_dir = [item['direction_index'] for item in curriculum]
         self.force_amplitude = 0.5  # TODO: read it from json
         self.n_curriculum = len(curriculum)
@@ -90,15 +81,15 @@ class TrussEnv:
         self.compliance_cache = {}
         self.stability_cache = {}
         self.stiffness_cache = {}
-        
         for i, design in enumerate(self.curriculum_design):
             force_node = self.curriculum_force_inds[i]
             force_dir = self.curriculum_force_dir[i]
             key = (tuple(design), int(force_node), int(force_dir))
             if key not in self.compliance_cache:
-                compliance = self.compute_compliance_only(design, force_node, force_dir)
-                self.compliance_cache[key] = compliance
-                self.stability_cache[key] = 1
+                filtered_compliance = self.compute_compliance_only(design, force_node, force_dir)
+                # compliance = self.c_filter(compliance, self.curriculum_design[i])
+                # self.compliance_cache[key] = compliance
+                self.stability_cache[key] = 1 #
             # Precompute and cache K for this design state
             design_key = tuple(design)
             if design_key not in self.stiffness_cache:
@@ -112,6 +103,9 @@ class TrussEnv:
 
 
     def action_masks(self, design_states):
+        # Convert to numpy array if it's a list
+        if isinstance(design_states, list):
+            design_states = np.array(design_states)
         masks = (design_states > 1e-6).astype(np.int32)
         return masks
 
@@ -179,17 +173,17 @@ class TrussEnv:
             return self.stability_cache[key]
 
         try:
-            disp, success, message, bar_compliances = self.solve_elasticity_with_cache(design_state, force_node,
+            disp, success, message, bar_compliance = self.solve_elasticity_with_cache(design_state, force_node,
                                                                                        force_dir)
             if not success:
                 raise ValueError("simulation failed!")
 
-            temp_compliance = np.array(bar_compliances)
+            temp_compliance = np.array(bar_compliance)
             temp_volume = np.sum(np.array(self.bar_vols) * design_state)
 
             # Filter compliance: set removed bars (design_state == 0) to zero compliance
-            filtered_compliance = temp_compliance.copy()
-            filtered_compliance[design_state < 1e-6] = 0.0
+            filtered_compliance = self.c_filter(temp_compliance, design_state)
+            #filtered_compliance[design_state < 1e-6] = 0.0
 
             self.compliance_cache[key] = filtered_compliance
 
@@ -221,7 +215,7 @@ class TrussEnv:
             return -1
 
     def check_terminate(self, design_states, force_nodes, force_dirs):
-        """Check termination condition for batch of states"""
+        """Check termination condition for batch of states, just for good termination"""
         terminate_flag = np.zeros(len(design_states), dtype=np.int32)
 
         for idx in range(len(design_states)):
@@ -231,24 +225,31 @@ class TrussEnv:
                 force_dir = force_dirs[idx]
                 key = tuple([force_node, force_dir])
                 compliance_key = (tuple(design_state), int(force_nodes[idx]), int(force_dirs[idx]))
-                disp, success, message, bar_compliances = self.solve_elasticity_with_cache(design_state, force_node,
-                                                                                           force_dir)
-                if not success:
-                    raise ValueError("simulation failed!")
+                if compliance_key not in self.compliance_cache:
+                    disp, success, message, bar_compliance = self.solve_elasticity_with_cache(design_state, force_node,
+                                                                                               force_dir)
+                    if not success:
+                        raise ValueError("simulation failed!")
 
-                total_compliance = float(np.sum(bar_compliances))
+
+
+                    filtered_compliance = self.c_filter(bar_compliance, design_state)
+
+                    self.compliance_cache[compliance_key] = filtered_compliance
+
+                bar_compliance = self.compliance_cache[compliance_key]
                 temp_volume = np.sum(np.array(self.bar_vols) * design_state)
-                filtered_compliance = np.array(bar_compliances)
-                filtered_compliance[design_state < 1e-6] = 0.0
-                self.compliance_cache[compliance_key] = filtered_compliance
+                total_compliance = float(np.sum(bar_compliance))
 
                 # Check for unstable states
-                if any(val >= self.compliance_threshold for val in bar_compliances):
-                    self.stability_cache[compliance_key] = -1
+                if any(val >= self.compliance_threshold for val in bar_compliance):
+                    if compliance_key not in self.stability_cache:
+                        self.stability_cache[compliance_key] = -1
                     continue
 
                 if temp_volume < self.target_volume_lb:
-                    self.stability_cache[compliance_key] = -1
+                    if compliance_key not in self.stability_cache:
+                        self.stability_cache[compliance_key] = -1
                     continue
 
                 # Check connectivity to force node
@@ -258,7 +259,8 @@ class TrussEnv:
                         bars_connected = True
                         break
                 if not bars_connected:
-                    self.stability_cache[compliance_key] = -1
+                    if compliance_key not in self.stability_cache:
+                        self.stability_cache[compliance_key] = -1
                     continue
 
                 # Only terminate if compliance is close to optimal and volume is within bounds
@@ -269,7 +271,8 @@ class TrussEnv:
                         and self.target_volume_lb <= temp_volume <= self.target_volume_ub
                 ):
                     terminate_flag[idx] = 1
-                    self.stability_cache[compliance_key] = 1
+                    if compliance_key not in self.stability_cache:
+                        self.stability_cache[compliance_key] = 1
 
             except Exception as e:
                 raise ValueError("simulation failed!")
@@ -292,7 +295,7 @@ class TrussEnv:
         if not success:
             raise ValueError("simulation failed!")
         filtered_compliance = np.array(bar_compliances)
-        filtered_compliance[design_state < 1e-6] = 0.0
+        filtered_compliance = self.c_filter(filtered_compliance, design_state)
         self.compliance_cache[key] = filtered_compliance
         # print(
         #     f"[DEBUG] Compliance cache size: {len(self.compliance_cache)}, Stiffness cache size: {len(self.stiffness_cache)}")

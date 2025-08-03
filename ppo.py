@@ -6,45 +6,37 @@ from time import perf_counter
 import copy
 import pickle
 from buffer import TrussRolloutBuffer
-from env import TrussEnv
-from policy import TrussGNNActorCritic
-from graph import TrussGraphConstructor
-from torch_geometric.data import Batch
+#from env import TrussEnv
+from src.Truss import TrussStructure
+from policy_global import MLPActorCritic
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 floatType = torch.float32
-intType = torch.int32
+intType = torch.long  # Changed from torch.int32 to torch.long for PyTorch indexing compatibility
 
 
 class TrussPPO:
-    def __init__(self, truss, settings: Dict):
+    def __init__(self, truss: TrussStructure, settings: Dict):
         self.truss = copy.deepcopy(truss)
         self.n_bars = len(self.truss.all_edges)
         self.free_nodes = self.truss.n_nodes - len(self.truss.fixed_nodes)
 
 
         ppo_config = settings.get("ppo", {})
-        hidden_dim = ppo_config.get("hidden_dim", 64)
-        num_layers = ppo_config.get("num_layers", 3)
-        num_force_dirs = ppo_config.get("num_force_dirs", 8)
-        force_dir_embed_dim = ppo_config.get("force_dir_embed_dim", 4)
+        obs_dim = ppo_config.get("obs_dim", 256)
+        hidden_sizes = ppo_config.get("hidden_sizes", (512, 512, 256))
 
-        self.graph_constructor = TrussGraphConstructor(self.truss)
-        self.policy = TrussGNNActorCritic(
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            num_actions=self.n_bars,
-            num_force_dirs=num_force_dirs,
-            force_dir_embed_dim=force_dir_embed_dim
+        self.policy = MLPActorCritic(
+            truss=self.truss,
+            obs_dim=obs_dim,
+            hidden_sizes=hidden_sizes
         ).to(device)
 
-        self.policy_old = TrussGNNActorCritic(
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            num_actions=self.n_bars,
-            num_force_dirs=num_force_dirs,
-            force_dir_embed_dim=force_dir_embed_dim
+        self.policy_old = MLPActorCritic(
+            truss=self.truss,
+            obs_dim=obs_dim,
+            hidden_sizes=hidden_sizes
         ).to(device)
 
         self.policy_old.load_state_dict(self.policy.state_dict())
@@ -92,29 +84,36 @@ class TrussPPO:
         self.accuracy_of_entire_curriculum = 0
 
     def select_action(self, design_states, compliances, force_nodes, force_dirs, masks: np.ndarray, env_inds: np.ndarray):
-        # Build HeteroData graphs for each environment in the batch
-        graph_data = []
-        for i in range(len(env_inds)):
-            g = self.graph_constructor.compute_graph(
-                design_states[i],
-                compliances[i],
-                force_nodes[i],
-                force_dirs[i]
-            )
-            graph_data.append(g)
-        # Batch the graphs for GNN input
 
-        batch_graph = Batch.from_data_list(graph_data).to(device)
         env_masks = torch.tensor(masks, dtype=floatType, device=device)
+        design_states_tensor = torch.stack([torch.tensor(ds, dtype=floatType) for ds in design_states]).to(device)
+
+        compliances_tensor = torch.tensor(np.array(compliances), dtype=floatType, device=device)
+
+        force_nodes_tensor = torch.tensor(force_nodes, dtype=torch.long, device=device)
+
+        force_dirs_tensor = torch.tensor(force_dirs, dtype=torch.long, device=device)
+
+
         self.policy_old.eval()
         with torch.no_grad():
-            action, action_logprob, state_val = self.policy_old.act(batch_graph, env_masks, self.deterministic)
-        # Store the HeteroData objects in the buffer
-        self.buffer.add('graph_data', graph_data, env_inds)
+            action, action_logprob, state_val = self.policy_old.act(design_states_tensor,
+                                                                    compliances_tensor,
+                                                                    force_nodes_tensor,
+                                                                    force_dirs_tensor,
+                                                                    env_masks,
+                                                                    self.deterministic)
+
+        self.buffer.add('design_states', design_states, env_inds)
         self.buffer.add('actions', action, env_inds)
         self.buffer.add('logprobs', action_logprob, env_inds)
         self.buffer.add("state_values", state_val, env_inds)
         self.buffer.add("masks", env_masks.cpu(), env_inds)
+
+        self.buffer.add("compliances", compliances, env_inds)
+        self.buffer.add("force_directions", force_dirs, env_inds)
+        self.buffer.add("force_node_indices", force_nodes, env_inds)
+
         return action.cpu().numpy()
 
     def update_policy(self, batch_size: int = None, update_iter: int = 5):
@@ -171,10 +170,13 @@ class TrussPPO:
 
 
     def train_one_epoch(self,
-                        batch_graph,
-                        actions,
-                        masks,
-                        logprobs,
+                        old_design_states,
+                        old_compliances,
+                        old_force_node_indices,
+                        old_force_dirs,
+                        old_actions,
+                        old_masks,
+                        old_logprobs,
                         rewards,
                         advantages,
                         weights,
@@ -182,19 +184,26 @@ class TrussPPO:
                         curriculum_id,
                         nstates,
                         first_batch):
-        """
-        Train for one epoch using a batch of data.
-        batch_graph: Batched HeteroData graph (from buffer/dataset)
-        actions, masks, logprobs, rewards, advantages, weights, entropy_weights, curriculum_id: RL data
-        """
-        # Forward pass through the policy
-        logprobs_pred, state_values, dist_entropy = self.policy.evaluate(batch_graph, actions, masks)
+
+        design_states = old_design_states
+        compliances = old_compliances  # Use the compliance data
+
+        batch_percentage = float(len(old_actions)) / nstates
+        logprobs, state_values, dist_entropy = self.policy.evaluate(design_states,
+                                                                    old_actions,
+                                                                    compliances,
+                                                                    old_force_node_indices,
+                                                                    old_force_dirs,
+                                                                    old_masks)
+
         state_values = torch.squeeze(state_values).reshape(-1)
-        ratios = torch.exp(logprobs_pred - logprobs.detach())
+        ratios = torch.exp(logprobs - old_logprobs.detach())
+
         surr1 = ratios * advantages
         surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
         value_loss = self.MseLoss(state_values, rewards)
         surrogate_loss = -torch.min(surr1, surr2)
+
         loss = (surrogate_loss * weights).mean() + 0.5 * (value_loss * weights).mean() - (
                 entropy_weights * dist_entropy * weights).mean()
         self.buffer.curriculum_visited[curriculum_id] = True
@@ -203,11 +212,14 @@ class TrussPPO:
                                                                                                  surrogate_loss.detach()),
                                                                                              reduce='sum',
                                                                                              include_self=not first_batch)
+
         entropy_mean = dist_entropy.mean().item()
-        batch_percentage = float(len(actions)) / nstates
+        
+
         loss *= batch_percentage
         loss_mean = loss.item()
         loss.mean().backward()
+
         return loss_mean, batch_percentage * surrogate_loss.mean().item(), batch_percentage * value_loss.mean().item(), batch_percentage * entropy_mean
 
     def save(self, checkpoint_path: str, settings: Dict):

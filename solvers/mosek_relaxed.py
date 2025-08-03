@@ -135,3 +135,94 @@ class Relaxed_SDP_Optimizer:
                 print(f"Optimization error: {str(e)}")
                 print("Optimization failed with exception")
                 return None, None
+
+    def solve_efficient(self):
+        """
+        Efficient SDP implementation using proper matrix constraints.
+        This method builds the full SDP matrix [[τ, -f^T], [-f, K(ρ)]] ⪰ 0
+        instead of using individual element-wise constraints.
+        """
+        epsilon = 1e-8
+        with Model("Truss_SDP_Efficient") as M:
+
+            # Create variables without PSD constraint yet
+            tau = M.variable("tau", Domain.unbounded())
+            rho = M.variable("rho", self.n_var, Domain.inRange(epsilon, 1.0))
+            
+            # Volume constraint
+            vols = self.truss.volumes.copy()
+            vol_terms = []
+            for idx in range(len(self.temp_design)):
+                vol_terms.append(Expr.mul(vols[idx], rho.index(idx)))
+            M.constraint("volume", Expr.add(vol_terms), Domain.lessThan(self.volume_constraint))
+
+            # Build K(ρ) matrix efficiently
+            K_expr = Matrix.dense(self.K_fixed)
+            for idx in range(len(self.temp_design)):
+                K_expr = Expr.add(K_expr, Expr.mul(Matrix.dense(self.K_diff[idx]), rho.index(idx)))
+
+            # Create the SDP matrix [[τ, -f^T], [-f, K(ρ)]] ⪰ 0
+            # This is the key improvement - single matrix constraint instead of O(n_dofs²) individual constraints
+            
+            # Build the full matrix using MOSEK's efficient matrix operations
+            n = self.n_dofs_proj
+            
+            # Upper-left: τ (compliance)
+            # Upper-right: -f^T (negative force vector)
+            neg_force_row = Expr.neg(Expr.reshape(self.mapped_force, (1, n)))
+            
+            # Lower-left: -f (negative force vector)
+            neg_force_col = Expr.neg(Expr.reshape(self.mapped_force, (n, 1)))
+            
+            # Lower-right: K(ρ) (stiffness matrix)
+            
+            # Assemble the full SDP matrix efficiently
+            # [[τ, -f^T], [-f, K(ρ)]]
+            SDP_matrix = Expr.blockDiag([
+                Expr.hstack([tau, neg_force_row]),
+                Expr.hstack([neg_force_col, K_expr])
+            ])
+            
+            # CORRECT: Single SDP constraint that enforces positive semidefiniteness
+            M.constraint("SDP", SDP_matrix, Domain.inPSDCone(self.matrix_size))
+
+            # Objective
+            M.objective(ObjectiveSense.Minimize, tau)
+
+            # Solver parameters
+            M.setSolverParam("intpntCoTolPfeas", 1e-6)
+            M.setSolverParam("intpntCoTolDfeas", 1e-6)
+            M.setSolverParam("intpntCoTolRelGap", 1e-6)
+            M.setSolverParam("intpntSolveForm", "dual")
+            M.setSolverParam("numThreads", 8)
+            M.setSolverParam("optimizer", "conic")
+
+            try:
+                print("Running efficient SDP optimization...")
+
+                M.solve()
+                status = M.getPrimalSolutionStatus()
+                print(f"Solution status: {status}")
+
+                if status in [SolutionStatus.Optimal, SolutionStatus.Feasible]:
+                    # Extract optimized design variables
+                    design_rho = rho.level()
+                    opt_tau = tau.level()
+
+                    # Map back to full bar array
+                    opt_rho = np.zeros(len(self.temp_design))
+                    for idx in range(self.n_var):
+                        opt_rho[idx] = design_rho[idx]
+
+                    print(f"Optimal compliance (tau): {opt_tau}")
+                    return opt_rho, opt_tau
+                else:
+                    print(f"Problem status: {M.getProblemStatus()}")
+                    print(f"Primal status: {M.getPrimalSolutionStatus()}")
+                    print(f"Dual status: {M.getDualSolutionStatus()}")
+                    return None, None
+            except Exception as e:
+                print(f"Optimization error type: {type(e).__name__}")
+                print(f"Optimization error: {str(e)}")
+                print("Optimization failed with exception")
+                return None, None
